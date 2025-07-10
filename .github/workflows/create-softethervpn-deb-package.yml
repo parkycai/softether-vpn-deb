@@ -32,7 +32,7 @@ jobs:
           fi
       # Step 2: Install dependencies
       - name: Install build dependencies
-        if: env.skip_build != 'true'
+        if: env.skip_build == 'false'
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake gcc g++ make pkgconf libncurses5-dev libssl-dev libsodium-dev libreadline-dev zlib1g-dev
@@ -83,19 +83,6 @@ jobs:
           draft: false
           prerelease: false
 
-      # Step 8: Delete source code assets from release
-      - name: Delete source code assets
-        if: env.skip_build == 'false'
-        run: |
-          RELEASE_ID=${{ steps.create_release.outputs.id }}
-          ASSETS=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            https://api.github.com/repos/${{ github.repository }}/releases/$RELEASE_ID/assets | jq -r '.[] | select(.name | test("Source code")) | .id')
-          for ASSET_ID in $ASSETS; do
-            curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              -X DELETE \
-              https://api.github.com/repos/${{ github.repository }}/releases/assets/$ASSET_ID
-          done
-
       # Step 9: Upload all .deb packages to release
       - name: Upload all .deb packages to release
         if: env.skip_build == 'false'
@@ -106,3 +93,49 @@ jobs:
               --data-binary "@$deb_file" \
               "https://uploads.github.com/repos/${{ github.repository }}/releases/${{ steps.create_release.outputs.id }}/assets?name=$(basename $deb_file)"
           done
+
+      - name: Checkout main branch
+        if: env.skip_build == 'false'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # 获取完整的仓库历史，以便切换到其他分支
+
+      - name: Checkout packages branch
+        if: env.skip_build == 'false'
+        run: |
+          git checkout packages
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+      - name: Delete existing .deb files
+        if: env.skip_build == 'false'
+        run: |
+          rm -f *.deb  # 删除当前目录下的所有 .deb 文件
+          echo "已删除所有 .deb 文件"
+          
+      - name: Copy .deb files from another directory
+        if: env.skip_build == 'false'
+        run: |
+          cp softether-vpn/build/*.deb .  # 从源目录复制 .deb 文件到当前目录
+          echo "已复制 .deb 文件"
+          
+      - name: Commit and push changes
+        if: env.skip_build == 'false'
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            git add *.deb
+            git commit -m "Update ${{ env.LATEST_TAG }} .deb packages"
+            git push origin packages
+            echo "已提交并推送更新"
+          else
+            echo "没有更改需要提交"
+            exit 0  # 无更改时退出工作流，不创建标签
+          fi
+          
+      - name: Create and push tag
+        if: env.skip_build == 'false'
+        run: |
+          TAG_NAME="packages-${{ env.LATEST_TAG }}"
+          git tag $TAG_NAME
+          git push origin $TAG_NAME
+          echo "已创建并推送标签: $TAG_NAME"
