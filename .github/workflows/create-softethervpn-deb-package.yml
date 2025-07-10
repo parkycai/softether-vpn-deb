@@ -1,141 +1,144 @@
 name: Build and Release SoftEther VPN .deb Package
 
 on:
-  workflow_dispatch: # Allows manual triggering
+    workflow_dispatch: # Allows manual triggering
 
 jobs:
-  build-deb:
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: write # Required for creating releases
-    steps:
-      # Step 3: Get the latest SoftEther VPN release tag
-      - name: Fetch latest release tag
-        id: get_release
-        run: |
-          LATEST_TAG=$(curl -s https://api.github.com/repos/SoftEtherVPN/SoftEtherVPN/releases/latest | jq -r '.tag_name')
-          echo "LATEST_TAG=$LATEST_TAG" >> $GITHUB_ENV
-          echo "Fetched latest tag: $LATEST_TAG"
+    build-deb:
+        runs-on: ubuntu-24.04
+        permissions:
+            contents: write # Required for creating releases
+        steps:
+            # Step 3: Get the latest SoftEther VPN release tag
+            - name: Fetch latest release tag
+              id: get_release
+              run: |
+                  LATEST_TAG=$(curl -s https://api.github.com/repos/SoftEtherVPN/SoftEtherVPN/releases/latest | jq -r '.tag_name')
+                  echo "LATEST_TAG=$LATEST_TAG" >> $GITHUB_ENV
+                  echo "Fetched latest tag: $LATEST_TAG"
 
-      - name: Check existing tags in this repository
-        id: check_tags
-        run: |
-          TAG_TO_CHECK="v${{ env.LATEST_TAG }}-deb"
-          TAG_EXISTS=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            https://api.github.com/repos/${{ github.repository }}/tags | jq -r '.[] | .name' | grep -Fx "$TAG_TO_CHECK" || true)
-          if [ -n "$TAG_EXISTS" ]; then
-            echo "Tag $TAG_TO_CHECK already exists, skipping build."
-            echo "skip_build=true" >> $GITHUB_ENV
-          else
-            echo "Tag $TAG_TO_CHECK not found, proceeding with build."
-            echo "skip_build=false" >> $GITHUB_ENV
-          fi
-      # Step 2: Install dependencies
-      - name: Install build dependencies
-        if: env.skip_build == 'false'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake gcc g++ make pkgconf libncurses5-dev libssl-dev libsodium-dev libreadline-dev zlib1g-dev
+            - name: Check existing tags in this repository
+              id: check_tags
+              run: |
+                  TAG_TO_CHECK="v${{ env.LATEST_TAG }}-deb"
+                  TAG_EXISTS=$(curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+                    https://api.github.com/repos/${{ github.repository }}/tags | jq -r '.[] | .name' | grep -Fx "$TAG_TO_CHECK" || true)
+                  if [ -n "$TAG_EXISTS" ]; then
+                    echo "Tag $TAG_TO_CHECK already exists, skipping build."
+                    echo "skip_build=true" >> $GITHUB_ENV
+                  else
+                    echo "Tag $TAG_TO_CHECK not found, proceeding with build."
+                    echo "skip_build=false" >> $GITHUB_ENV
+                  fi
+            # Step 2: Install dependencies
+            - name: Install build dependencies
+              if: env.skip_build == 'false'
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y cmake gcc g++ make pkgconf libncurses5-dev libssl-dev libsodium-dev libreadline-dev zlib1g-dev
 
+            # Step 4: clone softether vpn source
+            - name: Clone SoftEther VPN source
+              if: env.skip_build != 'true'
+              run: |
+                  git clone --depth 1 --branch ${{ env.LATEST_TAG }} https://github.com/SoftEtherVPN/SoftEtherVPN.git softether-vpn
+                  cd softether-vpn
+                  git submodule init && git submodule update
 
+            - name: Modify src/Cedar/Server.c
+              if: env.skip_build == 'false'
+              run: |
+                  sed -i '/bool SiIsEnterpriseFunctionsRestrictedOnOpenSource(CEDAR \*c)/{n;s/{/{\n    return false;/}' softether-vpn/src/Cedar/Server.c
 
-      # Step 4: clone softether vpn source
-      - name: Clone SoftEther VPN source
-        if: env.skip_build != 'true'
-        run: |
-          git clone --depth 1 --branch ${{ env.LATEST_TAG }} https://github.com/SoftEtherVPN/SoftEtherVPN.git softether-vpn
-          cd softether-vpn
-          git submodule init && git submodule update
+            # Step 5: Create Debian packaging structure
+            - name: Build source code
+              if: env.skip_build != 'true'
+              run: |
+                  cd softether-vpn
+                  ./configure
+                  make -C build
 
-      - name: Modify src/Cedar/Server.c
-        if: env.skip_build == 'false'
-        run: |
-          sed -i '/bool SiIsEnterpriseFunctionsRestrictedOnOpenSource(CEDAR \*c)/{n;s/{/{\n    return false;/}' softether-vpn/src/Cedar/Server.c
+            # Step 6: Build the .deb package
+            - name: Build .deb package
+              if: env.skip_build != 'true'
+              run: |
+                  cd softether-vpn/build
+                  cpack -G DEB
 
-      # Step 5: Create Debian packaging structure
-      - name: Build source code
-        if: env.skip_build != 'true'
-        run: |
-          cd softether-vpn
-          ./configure
-          make -C build
-          
-      # Step 6: Build the .deb package
-      - name: Build .deb package
-        if: env.skip_build != 'true'
-        run: |
-          cd softether-vpn/build
-          cpack -G DEB
+            # Step 7: Create or update GitHub release
+            - name: Create GitHub Release
+              if: env.skip_build != 'true'
+              id: create_release
+              uses: actions/create-release@v1
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              with:
+                  tag_name: v${{ env.LATEST_TAG }}-deb
+                  release_name: SoftEther VPN ${{ env.LATEST_TAG }} .deb Package
+                  body: |
+                      Debian packages for SoftEther VPN version ${{ env.LATEST_TAG }}.
+                      Includes packages for server, client, bridge, command-line tools, and common dependencies.
+                  draft: false
+                  prerelease: false
 
-      # Step 7: Create or update GitHub release
-      - name: Create GitHub Release
-        if: env.skip_build != 'true'
-        id: create_release
-        uses: actions/create-release@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          tag_name: v${{ env.LATEST_TAG }}-deb
-          release_name: SoftEther VPN ${{ env.LATEST_TAG }} .deb Package
-          body: |
-            Debian packages for SoftEther VPN version ${{ env.LATEST_TAG }}.
-            Includes packages for server, client, bridge, command-line tools, and common dependencies.
-          draft: false
-          prerelease: false
+            # Step 9: Upload all .deb packages to release
+            - name: Upload all .deb packages to release
+              if: env.skip_build == 'false'
+              run: |
+                  for deb_file in softether-vpn/build/*.deb; do
+                    curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+                      -H "Content-Type: application/vnd.debian.binary-package" \
+                      --data-binary "@$deb_file" \
+                      "https://uploads.github.com/repos/${{ github.repository }}/releases/${{ steps.create_release.outputs.id }}/assets?name=$(basename $deb_file)"
+                  done
 
-      # Step 9: Upload all .deb packages to release
-      - name: Upload all .deb packages to release
-        if: env.skip_build == 'false'
-        run: |
-          for deb_file in softether-vpn/build/*.deb; do
-            curl -s -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Content-Type: application/vnd.debian.binary-package" \
-              --data-binary "@$deb_file" \
-              "https://uploads.github.com/repos/${{ github.repository }}/releases/${{ steps.create_release.outputs.id }}/assets?name=$(basename $deb_file)"
-          done
+            - name: Checkout main branch
+              if: env.skip_build == 'false'
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0 # 获取完整的仓库历史，以便切换到其他分支
+                  path: packages
 
-      - name: Checkout main branch
-        if: env.skip_build == 'false'
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0  # 获取完整的仓库历史，以便切换到其他分支
+            - name: Checkout packages branch
+              if: env.skip_build == 'false'
+              run: |
+                  cd packages
+                  git checkout packages
+                  git config user.name "github-actions[bot]"
+                  git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Checkout packages branch
-        if: env.skip_build == 'false'
-        run: |
-          git checkout packages
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-      - name: Delete existing .deb files
-        if: env.skip_build == 'false'
-        run: |
-          rm -f *.deb  # 删除当前目录下的所有 .deb 文件
-          echo "已删除所有 .deb 文件"
-          
-      - name: Copy .deb files from another directory
-        if: env.skip_build == 'false'
-        run: |
-          cp softether-vpn/build/*.deb .  # 从源目录复制 .deb 文件到当前目录
-          echo "已复制 .deb 文件"
-          
-      - name: Commit and push changes
-        if: env.skip_build == 'false'
-        run: |
-          if [ -n "$(git status --porcelain)" ]; then
-            git add *.deb
-            git commit -m "Update ${{ env.LATEST_TAG }} .deb packages"
-            git push origin packages
-            echo "已提交并推送更新"
-          else
-            echo "没有更改需要提交"
-            exit 0  # 无更改时退出工作流，不创建标签
-          fi
-          
-      - name: Create and push tag
-        if: env.skip_build == 'false'
-        run: |
-          TAG_NAME="packages-${{ env.LATEST_TAG }}"
-          git tag $TAG_NAME
-          git push origin $TAG_NAME
-          echo "已创建并推送标签: $TAG_NAME"
+            - name: Delete existing .deb files
+              if: env.skip_build == 'false'
+              run: |
+                  cd packages
+                  rm -f *.deb  # 删除当前目录下的所有 .deb 文件
+                  echo "已删除所有 .deb 文件"
+
+            - name: Copy .deb files from another directory
+              if: env.skip_build == 'false'
+              run: |
+                  cp softether-vpn/build/*.deb packages/
+                  echo "已复制 .deb 文件"
+
+            - name: Commit and push changes
+              if: env.skip_build == 'false'
+              run: |
+                  cd packages
+                  if [ -n "$(git status --porcelain)" ]; then
+                    git add *.deb
+                    git commit -m "Update ${{ env.LATEST_TAG }} .deb packages"
+                    git push origin packages
+                    echo "已提交并推送更新"
+                  else
+                    echo "没有更改需要提交"
+                    exit 0  # 无更改时退出工作流，不创建标签
+                  fi
+
+            - name: Create and push tag
+              if: env.skip_build == 'false'
+              run: |
+                  cd packages
+                  TAG_NAME="packages-${{ env.LATEST_TAG }}"
+                  git tag $TAG_NAME
+                  git push origin $TAG_NAME
+                  echo "已创建并推送标签: $TAG_NAME"
