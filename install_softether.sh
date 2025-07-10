@@ -66,10 +66,37 @@ download_file() {
     local file_url="$1"
     local file_name="$2"
     echo "Downloading $file_name..."
-    if ! curl -s -L -o "$file_name" "$file_url"; then
-        echo "Failed to download $file_name"
-        exit 1
-    fi
+
+    # Use curl with --fail option to return non-zero exit code on HTTP errors
+    # --connect-timeout and --max-time options are added to handle network timeouts
+    curl -s -L --fail --connect-timeout 20 --max-time 600 -o "$file_name" "$file_url"
+    local curl_exit_code=$?
+
+    case $curl_exit_code in
+        0)
+            echo "Download of $file_name completed successfully."
+            ;;
+        6)
+            echo "Error: Could not resolve host. Check your DNS settings or the URL ($file_url)."
+            exit 1
+            ;;
+        7)
+            echo "Error: Failed to connect to the server. Check your network connection or the server status ($file_url)."
+            exit 1
+            ;;
+        22)
+            echo "Error: HTTP request returned a 404 (Not Found) status for $file_url."
+            exit 1
+            ;;
+        28)
+            echo "Error: Connection timed out while downloading $file_name from $file_url."
+            exit 1
+            ;;
+        *)
+            echo "Error: An unknown error occurred while downloading $file_name from $file_url. Curl exit code: $curl_exit_code"
+            exit 1
+            ;;
+    esac
 }
 
 # Function to fetch .deb package names and version from GitHub Release API
@@ -207,8 +234,6 @@ download_components() {
         local jsdelivr_url="${url_pair#jsdelivr:}"
         jsdelivr_url="${jsdelivr_url%%|*}"
         local github_url="${url_pair##*|github:}"
-        echo "jsdelivr_url: $jsdelivr_url"
-        echo "github_url: $github_url"
         if ! download_file "$jsdelivr_url" "${DEB_PACKAGES[$component]}"; then
             echo "jsDelivr CDN failed for ${DEB_PACKAGES[$component]}, falling back to GitHub..."
             download_file "$github_url" "${DEB_PACKAGES[$component]}"
