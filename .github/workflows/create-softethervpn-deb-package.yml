@@ -50,7 +50,7 @@ jobs:
       - name: Modify src/Cedar/Server.c
         if: env.skip_build == 'false'
         run: |
-          sed -i '/bool SiIsEnterpriseFunctionsRestrictedOnOpenSource(CEDAR \*c)/{n;s/{/{\n    return false;/' softether-vpn/src/Cedar/Server.c
+          sed -i '/bool SiIsEnterpriseFunctionsRestrictedOnOpenSource(CEDAR \*c)/{n;s/{/{\n    return false;/}' softether-vpn/src/Cedar/Server.c
 
       # Step 5: Create Debian packaging structure
       - name: Build source code
