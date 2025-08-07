@@ -4,8 +4,10 @@
 # Repository: https://github.com/parkycai/softether-vpn-deb
 # Downloads .deb files from the latest GitHub release via jsDelivr CDN or GitHub assets
 # Downloads .service files via jsDelivr CDN or GitHub raw
-# Extracts version exactly from release tag (e.g., 5.02.5187 from v5.02.5187-deb)
-# Extracts .deb filenames and URLs from browser_download_url matching softether-${component}
+# Extracts version exactly from release tag (e.g., 5.2.5188 from v5.2.5188-deb)
+# Extracts .deb filenames, URLs, and checksums from browser_download_url and digest fields
+# Checks if .deb file exists in execution directory or download directory and verifies checksum before downloading
+# Deletes mismatched files to ensure fresh downloads
 # Automatically installs common and vpncmd, allows user to select vpnclient, vpnserver, vpnclient+vpnserver, or vpnbridge
 # Installs common first, uninstalls it last to respect dependencies
 # Displays version number from release tag in the menu
@@ -14,6 +16,9 @@
 
 # Exit on error
 set -e
+
+# Capture execution directory
+EXEC_DIR=$(pwd)
 
 # Check if running with bash
 if [ -z "$BASH_VERSION" ]; then
@@ -42,10 +47,11 @@ DOWNLOAD_DIR="/tmp/softether-install"
 # List of components for reference
 COMPONENTS=("vpnclient" "vpnserver" "vpnbridge")
 
-# Associative arrays to store detected .deb package names, versions, and URLs
+# Associative arrays to store detected .deb package names, versions, URLs, and checksums
 declare -A DEB_PACKAGES
 declare -A DEB_VERSIONS
 declare -A DEB_URLS
+declare -A DEB_CHECKSUMS
 
 # Function to check if running as root
 check_root() {
@@ -95,9 +101,48 @@ download_file() {
     return $curl_exit_code
 }
 
-# Function to fetch .deb package names and version from GitHub Release API
+# Function to verify file checksum
+verify_checksum() {
+    local file_name="$1"
+    local expected_checksum="$2"
+    local file_path=""
+    # Check in execution directory first, then in DOWNLOAD_DIR
+    if [ -f "$EXEC_DIR/$file_name" ]; then
+        file_path="$EXEC_DIR/$file_name"
+    elif [ -f "$DOWNLOAD_DIR/$file_name" ]; then
+        file_path="$DOWNLOAD_DIR/$file_name"
+    else
+        echo "File $file_name does not exist in execution directory ($EXEC_DIR) or $DOWNLOAD_DIR."
+        return 1
+    fi
+    echo "Verifying checksum for $file_path..."
+    local actual_checksum
+    actual_checksum=$(sha256sum "$file_path" | cut -d' ' -f1)
+    if [ "$actual_checksum" = "$expected_checksum" ]; then
+        echo "Checksum verified for $file_path."
+        # If file is in execution directory, copy to DOWNLOAD_DIR
+        if [ "$file_path" = "$EXEC_DIR/$file_name" ]; then
+            cp "$file_path" "$DOWNLOAD_DIR/$file_name"
+        fi
+        return 0
+    else
+        echo "Checksum mismatch for $file_path. Expected: $expected_checksum, Got: $actual_checksum"
+        # Delete mismatched file from both locations
+        if [ -f "$EXEC_DIR/$file_name" ]; then
+            echo "Deleting mismatched file from execution directory: $EXEC_DIR/$file_name"
+            rm -f "$EXEC_DIR/$file_name"
+        fi
+        if [ -f "$DOWNLOAD_DIR/$file_name" ]; then
+            echo "Deleting mismatched file from download directory: $DOWNLOAD_DIR/$file_name"
+            rm -f "$DOWNLOAD_DIR/$file_name"
+        fi
+        return 1
+    fi
+}
+
+# Function to fetch .deb package names, version, and checksums from GitHub Release API
 fetch_deb_packages() {
-    echo "Fetching package names and version from GitHub Release API ($RELEASE_API_URL)..."
+    echo "Fetching package names, version, and checksums from GitHub Release API ($RELEASE_API_URL)..."
     # Temporary file for API response
     local temp_json="/tmp/repo_release.json"
     if ! curl -s -L "$RELEASE_API_URL" -o "$temp_json"; then
@@ -106,7 +151,7 @@ fetch_deb_packages() {
         exit 1
     fi
 
-    # Extract the latest release tag (e.g., v5.02.5187-deb)
+    # Extract the latest release tag (e.g., v5.2.5188-deb)
     local release_tag
     release_tag=$(grep -o '"tag_name":\s*"[^"]*"' "$temp_json" | sed 's/"tag_name":\s*"\(.*\)"/\1/' | head -n 1)
     if [ -z "$release_tag" ]; then
@@ -115,7 +160,7 @@ fetch_deb_packages() {
         exit 1
     fi
 
-    # Extract version number (e.g., 5.02.5187 from v5.02.5187-deb)
+    # Extract version number (e.g., 5.2.5188 from v5.2.5188-deb)
     local version
     version=$(echo "$release_tag" | sed -n 's/v\([^ ]*\)-deb/\1/p')
     if [ -z "$version" ]; then
@@ -124,28 +169,72 @@ fetch_deb_packages() {
         exit 1
     fi
 
-    # Parse .deb files and URLs for each component from release assets
+    # Parse .deb files, URLs, and checksums for each component from release assets
     for component in "common" "vpncmd" "${COMPONENTS[@]}"; do
-        # Extract browser_download_url for softether-${component}
-        local download_url
-        download_url=$(grep '"browser_download_url":.*softether-'${component}'_' "$temp_json" | sed 's/.*"browser_download_url":\s*"\(.*\)"/\1/' | head -n 1)
-        if [ -z "$download_url" ]; then
+        local asset_block_file="/tmp/asset_block_${component}.json"
+        # Use awk to capture the specific asset object by tracking brace levels
+        awk -v comp="softether-${component}_" '
+            BEGIN { in_assets=0; brace_count=0; block=""; found=0 }
+            /"assets":\s*\[/ { in_assets=1 }
+            in_assets && /"name":\s*"softether-'${component}'_/ {
+                found=1
+                block=$0 "\n"
+                brace_count=1
+                next
+            }
+            found && /{/ { brace_count++ }
+            found && /}/ {
+                brace_count--
+                block=block $0 "\n"
+                if (brace_count == 0) {
+                    print block
+                    exit
+                }
+            }
+            found { block=block $0 "\n" }
+            END { if (found==0) exit 1 }
+        ' "$temp_json" > "$asset_block_file"
+        if [ $? -ne 0 ]; then
             echo "No .deb package found for softether-${component} in release $release_tag"
-            rm -f "$temp_json"
+            rm -f "$temp_json" "$asset_block_file"
             exit 1
         fi
+
+        # Extract browser_download_url
+        local download_url
+        download_url=$(grep -o '"browser_download_url":\s*"[^"]*"' "$asset_block_file" | sed 's/"browser_download_url":\s*"\(.*\)"/\1/' | head -n 1)
+        if [ -z "$download_url" ]; then
+            echo "Failed to extract download URL for softether-${component}"
+            rm -f "$temp_json" "$asset_block_file"
+            exit 1
+        fi
+
         # Extract filename from browser_download_url
         local deb_file
         deb_file=$(echo "$download_url" | sed 's|.*/\([^/]*\)$|\1|')
         if [ -z "$deb_file" ]; then
             echo "Failed to extract filename for softether-${component} from $download_url"
-            rm -f "$temp_json"
+            rm -f "$temp_json" "$asset_block_file"
             exit 1
         fi
+
+        # Extract checksum (digest field, remove 'sha256:' prefix)
+        local checksum
+        checksum=$(grep -o '"digest":\s*"sha256:[^"]*"' "$asset_block_file" | sed 's/.*"digest":\s*"sha256:\(.*\)"/\1/' | head -n 1)
+        if [ -z "$checksum" ]; then
+            echo "Failed to extract checksum for softether-${component}"
+            rm -f "$temp_json" "$asset_block_file"
+            exit 1
+        fi
+
         DEB_PACKAGES["$component"]="$deb_file"
         DEB_VERSIONS["$component"]="$version"
+        DEB_CHECKSUMS["$component"]="$checksum"
         # Set jsDelivr URL as primary, GitHub as backup
         DEB_URLS["$component"]="jsdelivr:${JSDELIVR_RELEASE_BASE}-${version}/${deb_file}|github:${download_url}"
+
+        # Clean up asset block file
+        rm -f "$asset_block_file"
     done
 
     rm -f "$temp_json"
@@ -226,25 +315,47 @@ download_components() {
     # Download mandatory .deb components (common and vpncmd)
     echo "Downloading mandatory components (common and vpncmd) from release..."
     for component in "common" "vpncmd"; do
-        local url_pair="${DEB_URLS[$component]}"
-        local jsdelivr_url="${url_pair#jsdelivr:}"
-        jsdelivr_url="${jsdelivr_url%%|*}"
-        local github_url="${url_pair##*|github:}"
-        if ! download_file "$jsdelivr_url" "${DEB_PACKAGES[$component]}"; then
-            echo "jsDelivr CDN failed for ${DEB_PACKAGES[$component]}, falling back to GitHub..."
-            download_file "$github_url" "${DEB_PACKAGES[$component]}"
+        local deb_file="${DEB_PACKAGES[$component]}"
+        local checksum="${DEB_CHECKSUMS[$component]}"
+        if verify_checksum "$deb_file" "$checksum"; then
+            echo "File $deb_file already exists with valid checksum, skipping download."
+        else
+            local url_pair="${DEB_URLS[$component]}"
+            local jsdelivr_url="${url_pair#jsdelivr:}"
+            jsdelivr_url="${jsdelivr_url%%|*}"
+            local github_url="${url_pair#*|github:}"
+            if ! download_file "$jsdelivr_url" "$deb_file"; then
+                echo "jsDelivr CDN failed for $deb_file, falling back to GitHub..."
+                download_file "$github_url" "$deb_file"
+            fi
+            # Verify checksum after download
+            if ! verify_checksum "$deb_file" "$checksum"; then
+                echo "Checksum verification failed for $deb_file after download."
+                exit 1
+            fi
         fi
     done
 
     # Download selected components' .deb files
     for component in "${selected_components[@]}"; do
-        local url_pair="${DEB_URLS[$component]}"
-        local jsdelivr_url="${url_pair#jsdelivr:}"
-        jsdelivr_url="${jsdelivr_url%%|*}"
-        local github_url="${url_pair##*|github:}"
-        if ! download_file "$jsdelivr_url" "${DEB_PACKAGES[$component]}"; then
-            echo "jsDelivr CDN failed for ${DEB_PACKAGES[$component]}, falling back to GitHub..."
-            download_file "$github_url" "${DEB_PACKAGES[$component]}"
+        local deb_file="${DEB_PACKAGES[$component]}"
+        local checksum="${DEB_CHECKSUMS[$component]}"
+        if verify_checksum "$deb_file" "$checksum"; then
+            echo "File $deb_file already exists with valid checksum, skipping download."
+        else
+            local url_pair="${DEB_URLS[$component]}"
+            local jsdelivr_url="${url_pair#jsdelivr:}"
+            jsdelivr_url="${jsdelivr_url%%|*}"
+            local github_url="${url_pair#*|github:}"
+            if ! download_file "$jsdelivr_url" "$deb_file"; then
+                echo "jsDelivr CDN failed for $deb_file, falling back to GitHub..."
+                download_file "$github_url" "$deb_file"
+            fi
+            # Verify checksum after download
+            if ! verify_checksum "$deb_file" "$checksum"; then
+                echo "Checksum verification failed for $deb_file after download."
+                exit 1
+            fi
         fi
     done
 
@@ -252,10 +363,15 @@ download_components() {
     local repo_url="$REPO_URL_JSDELIVR"
     echo "Downloading .service files from jsDelivr CDN ($REPO_URL_JSDELIVR)..."
     for component in "${selected_components[@]}"; do
-        if ! download_file "${repo_url}/softether-${component}.service" "softether-${component}.service"; then
-            echo "jsDelivr CDN failed for softether-${component}.service, falling back to GitHub ($REPO_URL_GITHUB)..."
-            repo_url="$REPO_URL_GITHUB"
-            download_file "${repo_url}/softether-${component}.service" "softether-${component}.service"
+        local service_file="softether-${component}.service"
+        if [ -f "$service_file" ]; then
+            echo "Service file $service_file already exists, skipping download."
+        else
+            if ! download_file "${repo_url}/softether-${component}.service" "$service_file"; then
+                echo "jsDelivr CDN failed for $service_file, falling back to GitHub ($REPO_URL_GITHUB)..."
+                repo_url="$REPO_URL_GITHUB"
+                download_file "${repo_url}/softether-${component}.service" "$service_file"
+            fi
         fi
     done
 }
