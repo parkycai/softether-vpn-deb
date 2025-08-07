@@ -1,8 +1,6 @@
 # softether-vpn-deb
 
-Pre-built SoftEther VPN deb packages for Ubuntu.
-
-Enabled "Enterprise Functions":
+Pre-built SoftEther VPN deb packages for Ubuntu, with enabled "Enterprise Functions":
  - RADIUS / NT Domain user authentication
  - RSA certificate authentication
  - Deep-inspect packet logging
