@@ -78,25 +78,21 @@ download_file() {
             ;;
         6)
             echo "Error: Could not resolve host. Check your DNS settings or the URL ($file_url)."
-            exit 1
             ;;
         7)
             echo "Error: Failed to connect to the server. Check your network connection or the server status ($file_url)."
-            exit 1
             ;;
         22)
             echo "Error: HTTP request returned a 404 (Not Found) status for $file_url."
-            exit 1
             ;;
         28)
             echo "Error: Connection timed out while downloading $file_name from $file_url."
-            exit 1
             ;;
         *)
             echo "Error: An unknown error occurred while downloading $file_name from $file_url. Curl exit code: $curl_exit_code"
-            exit 1
             ;;
     esac
+    return $curl_exit_code
 }
 
 # Function to fetch .deb package names and version from GitHub Release API
